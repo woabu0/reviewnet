@@ -1,0 +1,76 @@
+@import url("https://fonts.googleapis.com/css2?family=Anek+Devanagari:wght@500&display=swap");
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@font-face {
+  font-family: regular;
+  src: url("./fonts/r.OTF");
+}
+
+@font-face {
+  font-family: medium;
+  src: url("./fonts/m.OTF");
+}
+
+@font-face {
+  font-family: semi-bold;
+  src: url("./fonts/s.ttf");
+}
+
+@font-face {
+  font-family: bold;
+  src: url("./fonts/b.OTF");
+}
+
+.r {
+  font-family: "regular";
+}
+
+.m {
+  font-family: "medium";
+}
+
+.s {
+  font-family: "semi-bold";
+}
+
+.b {
+  font-family: "bold";
+}
+
+.shadow {
+  box-shadow: 0px 12px 78px 0px rgba(0, 0, 0, 0.05);
+}
+
+.anek {
+  font-family: "Anek Devanagari", sans-serif;
+}
+
+#this {
+  flex-direction: row-reverse;
+}
+
+@media (max-width: 767px) {
+  #this {
+    flex-direction: column-reverse;
+  }
+}
+
+.expand {
+  transition: 0.5s ease all;
+}
+
+input[type="radio"] {
+  display: none;
+  cursor: pointer;
+}
+
+input[type="radio"]:checked + label {
+  background-color: #3772ff;
+  color: white;
+}
+
+.bg{
+  background: linear-gradient(#0049FF 50%, #FFF 50%);
+}

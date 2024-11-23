@@ -1,0 +1,37 @@
+[
+  {
+    "id": "!this",
+    "id2": "!this2",
+    "title": "Diabetic Retinopathy",
+    "detail": "A complication commonly seen in diabetics. It is caused by damage to the blood vessels in the tissue located at the back of the eye (retina) and can eventually lead to blindness.",
+    "video": "https://www.youtube.com/embed/TSRcjWmkf_A?si=BM27ZF7D-Y9Z7pgp&amp"
+  },
+  {
+    "id": "this",
+    "id2": "this2",
+    "title": "Macular Edema",
+    "detail": "A condition where fluid and protein deposits collect on or under the macula of the eye (a yellow central area of the retina), causing it to thicken and swell (edema), leading to distorted vision.",
+    "video": "https://www.youtube.com/embed/_qv30ml8Whs?si=dBG36DNaPH7yAXmM&amp"
+  },
+  {
+    "id": "!this",
+    "id2": "!this2",
+    "title": "Age-Related Macular Degeneration",
+    "detail": "This affects the middle part of your vision. It usually first affects people in their 50s and 60s. It doesn't cause total blindness. But it can make everyday activities like reading and recognising faces difficult.",
+    "video": "https://www.youtube.com/embed/QiCaBbVfOsQ?si=THfhxFc_43ktdH1C&amp"
+  },
+  {
+    "id": "this",
+    "id2": "this2",
+    "title": "Glaucoma",
+    "detail": "Glaucoma is a group of eye conditions that damage the optic nerve, the health of which is crucial for good vision. This damage is often caused by abnormally high pressure in the eye and can lead to blindness if left untreated.",
+    "video": "https://www.youtube.com/embed/6Tw9MjgqZCw?si=8jDc_ppqitt5_d2h&amp"
+  },
+  {
+    "id": "!this",
+    "id2": "!this2",
+    "title": "Cataract",
+    "detail": "A cataract is a clouding of the lens in the eye, which leads to decreased vision. It commonly results from ageing but may also occur due to trauma or radiation exposure or be inherited through genetic disorders. Cataracts can be successfully treated with surgery.",
+    "video": "https://www.youtube.com/embed/n1iNx4RqiiY?si=mK5z9xqvO09PnKjb&amp"
+  }
+]

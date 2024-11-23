@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Amoha.ai</title>
+    <meta
+      name="description"
+      content="Amoha.ai is an innovative Software-as-a-Service (SaaS) MedTech platform designed to revolutionize the early detection and management of various ocular conditions such as diabetic retinopathy, glaucoma, AMD, cataracts, etc., which, if unchecked, can lead to significant vision loss or even blindness."
+    />
+    <style>
+      * {
+        padding: 0;
+        margin: 0;
+        scroll-behavior: smooth;
+        box-sizing: border-box;
+      }
+      body {
+        color: #fff;
+        background-color: #fafafa;
+        font-size: 22px;
+        overflow-x: hidden;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+    <script
+      type="text/javascript"
+      src="https://cdn.jsdelivr.net/npm/@emailjs/browser@3/dist/email.min.js"
+    ></script>
+    <script type="text/javascript">
+      (function () {
+        emailjs.init("X2BgLpJsY18HGn10P");
+      })();
+    </script>
+  </body>
+</html>
