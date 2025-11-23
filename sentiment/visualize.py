@@ -1,20 +1,26 @@
-# app_sentiment_analysis_distilbert_simple.py - Analyze sentiment by app using DistilBERT (simplified)
-from sentiment_detector_distilbert_simple import SentimentDetectorDistilBERTSimple
+# visualize.py - Create visualizations for sentiment analysis by app
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
+import os
+import sys
+from detector import SentimentDetector
 
-def analyze_sentiment_by_app():
-    """Analyze and visualize sentiment distribution for each app using DistilBERT"""
-    print("📊 Analyzing Sentiment by App (DistilBERT - Simplified)...\n")
+def create_app_sentiment_chart():
+    """Create bar chart showing sentiment distribution by app"""
+    print("📊 Creating Sentiment Distribution Chart by App...\n")
+    
+    # Check if model exists
+    if not os.path.exists('./distilbert_sentiment_model_final'):
+        print("❌ Trained model not found!")
+        print("Please train the model first by running: python train.py")
+        return
     
     try:
-        detector = SentimentDetectorDistilBERTSimple()
-    except ImportError as e:
+        detector = SentimentDetector()
+    except Exception as e:
         print(f"❌ Error: {e}")
-        print("\nPlease install required packages:")
-        print("pip install transformers torch")
-        return None
+        return
     
     # Map file names to app names
     app_mapping = {
@@ -26,48 +32,41 @@ def analyze_sentiment_by_app():
         'sultansdine.csv': 'Sultans Dine'
     }
     
+    # Get data directory
+    data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data')
+    
     # Load data for each app separately and predict
     app_data = {}
     
     for file_name, app_name in app_mapping.items():
         try:
-            df = pd.read_csv(f'data/{file_name}')
+            file_path = os.path.join(data_dir, file_name)
+            if not os.path.exists(file_path):
+                print(f"⚠️  File not found: {file_name}")
+                continue
+            
+            df = pd.read_csv(file_path)
             df['cleaned_text'] = df['content'].apply(detector.clean_text)
             df = df[df['cleaned_text'].str.len() > 0]
             
-            # Predict sentiment for each review (process in smaller batches)
+            # Predict sentiment for each review
             predictions = []
             print(f"Processing {app_name} ({len(df)} reviews)...")
             
-            batch_size = 10
-            texts = df['content'].tolist()
-            
-            for i in range(0, len(texts), batch_size):
-                batch = texts[i:i+batch_size]
-                try:
-                    # Process batch
-                    for text in batch:
-                        try:
-                            result = detector.predict_sentiment(text)
-                            sentiment_label = result['sentiment']
-                            # Map to numeric
-                            if sentiment_label == 'Negative':
-                                predictions.append(0)
-                            elif sentiment_label == 'Positive':
-                                predictions.append(1)
-                            else:
-                                predictions.append(2)
-                        except Exception as e:
-                            predictions.append(2)  # Default to neutral on error
-                except Exception as e:
-                    # If batch fails, add neutrals
-                    predictions.extend([2] * len(batch))
+            for i, text in enumerate(df['content'].tolist()):
+                result = detector.predict_sentiment(text)
+                sentiment_label = result['sentiment']
+                # Map to numeric
+                if sentiment_label == 'Negative':
+                    predictions.append(0)
+                elif sentiment_label == 'Positive':
+                    predictions.append(1)
+                else:
+                    predictions.append(2)
                 
                 # Progress indicator
-                if (i + batch_size) % 50 == 0 or (i + batch_size) >= len(texts):
-                    print(f"  Processed {min(i + batch_size, len(texts))}/{len(df)} reviews...")
-            
-            df['sentiment'] = predictions
+                if (i + 1) % 50 == 0 or (i + 1) == len(df):
+                    print(f"  Processed {i + 1}/{len(df)} reviews... ({(i+1)*100//len(df)}%)")
             
             # Count sentiments
             sentiment_counts = pd.Series(predictions).value_counts().sort_index()
@@ -83,6 +82,12 @@ def analyze_sentiment_by_app():
                   f"Positive: {app_data[app_name]['positive']}\n")
         except Exception as e:
             print(f"✗ Error loading {file_name}: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    if not app_data:
+        print("❌ No data processed. Exiting.")
+        return
     
     # Create visualization with grouped bars
     apps = list(app_data.keys())
@@ -120,7 +125,7 @@ def analyze_sentiment_by_app():
     # Customize the plot
     ax.set_xlabel('App', fontsize=14, fontweight='bold')
     ax.set_ylabel('Number of Reviews', fontsize=14, fontweight='bold')
-    ax.set_title('Sentiment Distribution by App (DistilBERT)', fontsize=18, fontweight='bold', pad=20)
+    ax.set_title('Sentiment Distribution by App', fontsize=18, fontweight='bold', pad=20)
     ax.set_xticks(x)
     ax.set_xticklabels(apps, rotation=0, ha='center', fontsize=11, fontweight='bold')
     ax.legend(loc='upper left', fontsize=12, framealpha=0.95)
@@ -136,13 +141,14 @@ def analyze_sentiment_by_app():
     ax.set_ylim(top=max_value * 1.1)
     
     plt.tight_layout()
-    plt.savefig('app_sentiment_distribution_distilbert.png', dpi=300, bbox_inches='tight')
-    print(f"\n✅ Graph saved as 'app_sentiment_distribution_distilbert.png'")
+    output_file = 'app_sentiment.png'
+    plt.savefig(output_file, dpi=300, bbox_inches='tight')
+    print(f"\n✅ Graph saved as '{output_file}'")
     plt.close()
     
     # Print summary table
     print("\n" + "="*80)
-    print("📈 SENTIMENT SUMMARY BY APP (DistilBERT)")
+    print("📈 SENTIMENT SUMMARY BY APP")
     print("="*80)
     print(f"\n{'App':<20} {'Negative':<12} {'Neutral':<12} {'Positive':<12} {'Total':<10} {'% Positive':<12}")
     print("-"*80)
@@ -156,11 +162,9 @@ def analyze_sentiment_by_app():
     return app_data
 
 def main():
-    app_data = analyze_sentiment_by_app()
+    app_data = create_app_sentiment_chart()
     if app_data:
-        print("\n✅ Analysis complete! Check the generated PNG file.")
-    else:
-        print("\n❌ Analysis failed. Please check the error messages above.")
+        print("\n✅ Visualization complete! Check the generated PNG file.")
 
 if __name__ == "__main__":
     main()

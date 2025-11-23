@@ -1,4 +1,4 @@
-from wordcloud import WordCloud
+from graph.wordcloud import WordCloud
 import matplotlib.pyplot as plt
 
 text = "Machine learning makes machines learn from data. Learning is key in machine learning."
