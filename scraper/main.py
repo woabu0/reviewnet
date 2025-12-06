@@ -28,4 +28,4 @@ def collect_all_reviews(app_id, output_file="reviews.csv", lang="en", country="u
     print(f"Saved to {output_file}")
 
 # Example usage
-collect_all_reviews("com.graaho.khaodao", "khaodao.csv")
+collect_all_reviews("com.now.munchies.app", "munchies.csv")
