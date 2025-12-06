@@ -35,7 +35,7 @@ print("THEME CLASSIFICATION FOR BLIND APP REVIEWS")
 print("="*80 + "\n")
 
 # Configuration
-CSV_FILE = "proyojon.csv"  # Update path as needed
+CSV_FILE = "../data"  # Update path as needed
 REVIEW_COLUMN = 'review'
 
 # ============================================================================
