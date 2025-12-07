@@ -29,9 +29,9 @@ warnings.filterwarnings("ignore")
 # Configuration
 # ============================================================================
 class Config:
-    DATA_DIR = 'data'
-    OUTPUT_DIR = 'outputs'
-    CONFUSION_MATRIX_DIR = os.path.join(OUTPUT_DIR, 'bert_confusion_matrix')
+    DATA_DIR = 'negative_data'
+    OUTPUT_DIR = 'negative_outputs'
+    CONFUSION_MATRIX_DIR = os.path.join(OUTPUT_DIR, 'negative_bert_confusion_matrix')
 
 # ============================================================================
 # ENHANCED SENTIMENT KEYWORDS (from train.py)

@@ -1,0 +1,11 @@
+Model,Embedding,Accuracy,Precision,Recall,F1
+Random Forest,MPNet,100.0,100.0,100.0,100.0
+Naive Bayes,MPNet,100.0,100.0,100.0,100.0
+Decision Tree,MPNet,100.0,100.0,100.0,100.0
+AdaBoost,MPNet,100.0,100.0,100.0,100.0
+LightGBM,MPNet,100.0,100.0,100.0,100.0
+Random Forest,all-MiniLM-L6,100.0,100.0,100.0,100.0
+Naive Bayes,all-MiniLM-L6,100.0,100.0,100.0,100.0
+Decision Tree,all-MiniLM-L6,100.0,100.0,100.0,100.0
+AdaBoost,all-MiniLM-L6,100.0,100.0,100.0,100.0
+LightGBM,all-MiniLM-L6,100.0,100.0,100.0,100.0

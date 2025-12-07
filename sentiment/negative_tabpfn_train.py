@@ -1,4 +1,4 @@
-# BERT-based Sentiment Analysis Training Script
+# TabPFN-based Sentiment Analysis Training Script
 import os
 import sys
 import pandas as pd
@@ -18,10 +18,53 @@ os.environ["MKL_NUM_THREADS"] = "1"
 os.environ["NUMEXPR_NUM_THREADS"] = "1"
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
+# Fix einops TensorFlow detection issue
+# Patch einops to skip TensorFlow backend detection
+try:
+    import einops._backends
+    # Monkey patch to prevent TensorFlow detection errors
+    original_get_backend = einops._backends.get_backend
+    def patched_get_backend(tensor):
+        try:
+            return original_get_backend(tensor)
+        except (AttributeError, ImportError):
+            # If TensorFlow detection fails, use PyTorch backend
+            import torch
+            if isinstance(tensor, torch.Tensor):
+                return einops._backends.TorchBackend()
+            raise
+    einops._backends.get_backend = patched_get_backend
+except Exception:
+    pass  # If patching fails, continue anyway
+
+from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.preprocessing import StandardScaler
 import matplotlib.pyplot as plt
 import seaborn as sns
+
+# Try to import TabPFN with compatibility for newer versions
+try:
+    from tabpfn import TabPFNClassifier
+    TABPFN_AVAILABLE = True
+    print("✅ Using TabPFN Classifier")
+except ImportError:
+    try:
+        from tabpfn.models import TabPFNClassifier
+        TABPFN_AVAILABLE = True
+        print("✅ Using TabPFN Classifier from models module")
+    except ImportError:
+        TABPFN_AVAILABLE = False
+        print("⚠️  TabPFN not available. Install with: pip install tabpfn")
+
+# Try to import transformers for ground truth
+try:
+    from transformers import AutoTokenizer, AutoModelForSequenceClassification
+    TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    TRANSFORMERS_AVAILABLE = False
+    print("❌ Transformers not available. Install with: pip install transformers")
 
 warnings.filterwarnings("ignore")
 
@@ -29,12 +72,12 @@ warnings.filterwarnings("ignore")
 # Configuration
 # ============================================================================
 class Config:
-    DATA_DIR = 'data'
-    OUTPUT_DIR = 'outputs'
-    CONFUSION_MATRIX_DIR = os.path.join(OUTPUT_DIR, 'bert_confusion_matrix')
+    DATA_DIR = 'negative_data'
+    OUTPUT_DIR = 'negative_outputs'
+    CONFUSION_MATRIX_DIR = os.path.join(OUTPUT_DIR, 'negative_tabpfn_confusion_matrix')
 
 # ============================================================================
-# ENHANCED SENTIMENT KEYWORDS (from train.py)
+# ENHANCED SENTIMENT KEYWORDS (from bert_train.py)
 # ============================================================================
 POSITIVE_KEYWORDS = {
     'good': 2, 'best': 3, 'fast': 2, 'great': 3, 'good service': 4, 
@@ -81,7 +124,6 @@ def clean_text_advanced(text):
         return ""
     
     text = str(text).strip()
-    # Don't filter out short texts - keep them as is
     if len(text) == 0:
         return ""
     
@@ -91,10 +133,10 @@ def clean_text_advanced(text):
     text = re.sub(r'[^\w\s\u0980-\u09FF@#!?]', ' ', text)
     # Remove extra whitespace
     text = re.sub(r'\s+', ' ', text).strip()
-    return text if len(text) > 0 else " "  # Return space if empty to keep the row
+    return text if len(text) > 0 else " "
 
 # ============================================================================
-# ADVANCED SENTIMENT DETECTION (Ground Truth)
+# ADVANCED SENTIMENT DETECTION (Ground Truth Fallback)
 # ============================================================================
 def detect_sentiment_advanced(text):
     """Advanced sentiment detection with contextual understanding"""
@@ -157,34 +199,31 @@ def detect_sentiment_advanced(text):
         return 2  # Positive
     
     elif negative_score > 0:
-        # Low negative score - could be neutral or negative
         if negative_score >= 3:
             return 0  # Negative
         else:
             return 1  # Neutral
     
     elif positive_score > 0:
-        # Low positive score - could be neutral or positive
         if positive_score >= 3:
             return 2  # Positive
         else:
             return 1  # Neutral
     
     else:
-        # No signal at all - default to neutral
         return 1  # Neutral
 
 # ============================================================================
-# Model Loading Functions
+# Ground Truth Generation (Using RoBERTa)
 # ============================================================================
 def get_sentiment_model(model_name):
     """Load sentiment model with error handling"""
+    if not TRANSFORMERS_AVAILABLE:
+        return None, None
     try:
-        # Clear any existing models from memory first
         gc.collect()
         time.sleep(0.2)
         
-        # Load tokenizer
         tokenizer = AutoTokenizer.from_pretrained(
             model_name, 
             local_files_only=False
@@ -192,7 +231,6 @@ def get_sentiment_model(model_name):
         
         time.sleep(0.1)
         
-        # Load model
         try:
             model = AutoModelForSequenceClassification.from_pretrained(
                 model_name,
@@ -201,27 +239,20 @@ def get_sentiment_model(model_name):
                 local_files_only=False
             )
         except (TypeError, ValueError):
-            # Fallback for older versions
             model = AutoModelForSequenceClassification.from_pretrained(
                 model_name,
                 low_cpu_mem_usage=True,
                 local_files_only=False
             )
         
-        # Set model to eval mode
         model.eval()
         for param in model.parameters():
             param.requires_grad = False
         
-        # Ensure model is on CPU
         model = model.cpu()
-        
         return tokenizer, model
     except Exception as e:
         print(f"Error loading model {model_name}: {e}")
-        import traceback
-        traceback.print_exc()
-        gc.collect()
         return None, None
 
 def predict_sentiment_batch(texts, tokenizer, model, model_name, device="cpu"):
@@ -230,15 +261,12 @@ def predict_sentiment_batch(texts, tokenizer, model, model_name, device="cpu"):
         return [-1] * len(texts)
     
     try:
-        # Map model outputs to sentiment labels
         model_label_map = {
             "nlptown/bert-base-multilingual-uncased-sentiment": {0: "negative", 1: "negative", 2: "neutral", 3: "positive", 4: "positive"},
             "distilbert-base-uncased-finetuned-sst-2-english": {0: "negative", 1: "positive"},
             "cardiffnlp/twitter-roberta-base-sentiment-latest": {0: "negative", 1: "neutral", 2: "positive"},
-            "huawei-noah/TinyBERT_General_4L_312D": {0: "negative", 1: "positive"},  # TinyBERT binary classification
-            "textattack/albert-base-v2-SST-2": {0: "negative", 1: "positive"},  # ALBERT binary classification
-            "microsoft/deberta-base": {0: "negative", 1: "positive"},  # Binary classification
-            "microsoft/deberta-v3-base": {0: "negative", 1: "positive"}  # Binary classification
+            "microsoft/deberta-base": {0: "negative", 1: "positive"},
+            "microsoft/deberta-v3-base": {0: "negative", 1: "positive"}
         }
         
         inputs = tokenizer(
@@ -250,7 +278,6 @@ def predict_sentiment_batch(texts, tokenizer, model, model_name, device="cpu"):
             add_special_tokens=True
         )
         
-        # Keep everything on CPU
         model = model.cpu()
         
         with torch.no_grad():
@@ -258,13 +285,11 @@ def predict_sentiment_batch(texts, tokenizer, model, model_name, device="cpu"):
         
         predictions = torch.argmax(logits, dim=1).cpu().numpy()
         
-        # Map to sentiment labels
         label_map = model_label_map.get(model_name, {0: "negative", 1: "positive"})
         sentiments = []
         for pred in predictions:
             if pred in label_map:
                 sentiment = label_map[pred]
-                # Convert to numeric: negative=0, neutral=1, positive=2
                 if sentiment == "negative":
                     sentiments.append(0)
                 elif sentiment == "neutral":
@@ -278,6 +303,34 @@ def predict_sentiment_batch(texts, tokenizer, model, model_name, device="cpu"):
     except Exception as e:
         print(f"Error in batch sentiment prediction for {model_name}: {e}")
         return [-1] * len(texts)
+
+# ============================================================================
+# Feature Extraction (TF-IDF)
+# ============================================================================
+def create_features(texts_train, texts_test, max_features=100):
+    """Create TF-IDF features from text
+    Note: TabPFN is restricted to max 100 features, so we limit to 100
+    """
+    try:
+        vectorizer = TfidfVectorizer(
+            max_features=max_features,
+            ngram_range=(1, 2),  # Use unigrams and bigrams
+            min_df=2,  # Minimum document frequency
+            max_df=0.95,  # Maximum document frequency
+            stop_words='english'  # Remove English stop words
+        )
+        
+        X_train_features = vectorizer.fit_transform(texts_train)
+        X_test_features = vectorizer.transform(texts_test)
+        
+        # Convert to dense array (TabPFN works better with dense arrays)
+        X_train_features = X_train_features.toarray()
+        X_test_features = X_test_features.toarray()
+        
+        return X_train_features, X_test_features, vectorizer
+    except Exception as e:
+        print(f"   ❌ Error creating TF-IDF features: {e}")
+        return None, None, None
 
 # ============================================================================
 # Data Loading
@@ -311,7 +364,6 @@ def load_data_enhanced():
             df = df.dropna(subset=["content"])
             df['content'] = df['content'].astype(str)
             df['cleaned_text'] = df['content'].apply(clean_text_advanced)
-            # Keep all rows - don't filter by length
             all_data.append(df)
             
         except Exception as e:
@@ -331,11 +383,13 @@ def load_data_enhanced():
 def create_confusion_matrix(y_true, y_pred, model_name, output_dir, accuracy=None):
     """Create and save confusion matrix for a model with accuracy displayed"""
     try:
-        # Convert to numpy arrays
-        y_true = np.array(y_true)
-        y_pred = np.array(y_pred)
+        # Ensure output directory exists
+        os.makedirs(output_dir, exist_ok=True)
         
-        # Filter out invalid predictions
+        # Convert to numpy arrays and ensure they are 1D
+        y_true = np.array(y_true).flatten()
+        y_pred = np.array(y_pred).flatten()
+        
         valid_mask = (y_pred != -1)
         if np.sum(valid_mask) == 0:
             print(f"      ⚠️  No valid predictions for {model_name}")
@@ -344,25 +398,20 @@ def create_confusion_matrix(y_true, y_pred, model_name, output_dir, accuracy=Non
         y_true_valid = y_true[valid_mask]
         y_pred_valid = y_pred[valid_mask]
         
-        # Create confusion matrix
         cm = confusion_matrix(y_true_valid, y_pred_valid, labels=[0, 1, 2])
         
-        # Normalize confusion matrix by row (each row sums to 100%)
+        # Normalize confusion matrix by row (each row sums to 1.0)
         cm_normalized = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
-        cm_normalized = np.nan_to_num(cm_normalized)  # Handle division by zero
+        cm_normalized = np.nan_to_num(cm_normalized)
         
-        # Calculate accuracy if not provided
         if accuracy is None:
             accuracy = accuracy_score(y_true_valid, y_pred_valid) * 100
         
-        # Create figure - larger size for research paper
         fig, ax = plt.subplots(figsize=(12, 10))
         
-        # Labels for sentiment classes
         labels = ['Negative', 'Neutral', 'Positive']
         
-        # Create custom annotations with dynamic font color
-        # Format: decimal values between 0 and 1 (3 decimal places)
+        # Create custom annotations with decimal values (0 to 1)
         annot_data = np.empty_like(cm_normalized, dtype=object)
         for i in range(cm_normalized.shape[0]):
             for j in range(cm_normalized.shape[1]):
@@ -370,7 +419,6 @@ def create_confusion_matrix(y_true, y_pred, model_name, output_dir, accuracy=Non
                 annot_data[i, j] = f'{value:.3f}'
         
         # Create heatmap with normalized values (0 to 1)
-        # Increased font sizes for research paper readability
         heatmap = sns.heatmap(cm_normalized, annot=annot_data, fmt='', cmap='Blues', 
                              xticklabels=labels, yticklabels=labels, ax=ax,
                              cbar_kws={'label': 'Normalized Value'},
@@ -379,14 +427,11 @@ def create_confusion_matrix(y_true, y_pred, model_name, output_dir, accuracy=Non
                              vmin=0, vmax=1)
         
         # Set dynamic font colors based on cell background brightness
-        # The texts are added in row-major order (left to right, top to bottom)
         text_idx = 0
         for i in range(cm_normalized.shape[0]):
             for j in range(cm_normalized.shape[1]):
                 if text_idx < len(ax.texts):
-                    # Get the color based on the cell value
                     value = cm_normalized[i, j]
-                    # Use black text for light cells (value < 0.4), white for dark cells
                     text_color = 'black' if value < 0.4 else 'white'
                     ax.texts[text_idx].set_color(text_color)
                     text_idx += 1
@@ -404,7 +449,6 @@ def create_confusion_matrix(y_true, y_pred, model_name, output_dir, accuracy=Non
         cbar = ax.collections[0].colorbar
         cbar.set_label('Normalized Value', fontsize=18, fontweight='bold')
         cbar.ax.tick_params(labelsize=16)
-        # Format colorbar ticks as decimal values (0 to 1)
         cbar.set_ticks([0, 0.2, 0.4, 0.6, 0.8, 1.0])
         cbar.set_ticklabels(['0.0', '0.2', '0.4', '0.6', '0.8', '1.0'])
         
@@ -420,63 +464,44 @@ def create_confusion_matrix(y_true, y_pred, model_name, output_dir, accuracy=Non
         return True
     except Exception as e:
         print(f"      ⚠️  Error creating confusion matrix for {model_name}: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 # ============================================================================
 # Visualization Functions
 # ============================================================================
-def create_performance_visualization(results_df, output_dir):
+def create_performance_visualization(result, output_dir):
     """Create performance visualization with same blue color and different bar patterns"""
     fig, axes = plt.subplots(2, 2, figsize=(20, 16))
-    fig.suptitle('BERT Model Performance Comparison', 
+    fig.suptitle('TabPFN Model Performance', 
                  fontsize=24, fontweight='bold', y=0.98)
     
-    models = results_df['Model'].unique()
     # Use white color for bars with black edges
     base_color = 'white'
-    
-    # Define different bar patterns/styles for each model
-    # Pattern styles: solid, hatched (horizontal, vertical, diagonal, crosshatch), edge styles
-    bar_styles = [
-        {'color': base_color, 'alpha': 1.0, 'edgecolor': 'black', 'linewidth': 2.5, 'hatch': None},  # Solid bold
-        {'color': base_color, 'alpha': 1.0, 'edgecolor': 'black', 'linewidth': 2.5, 'hatch': '///'},  # Diagonal lines
-        {'color': base_color, 'alpha': 1.0, 'edgecolor': 'black', 'linewidth': 2.5, 'hatch': '---'},  # Horizontal lines
-        {'color': base_color, 'alpha': 1.0, 'edgecolor': 'black', 'linewidth': 2.5, 'hatch': '|||'},  # Vertical lines
-        {'color': base_color, 'alpha': 1.0, 'edgecolor': 'black', 'linewidth': 2.5, 'hatch': '+++'},  # Crosshatch
-    ]
     
     metrics = [('Accuracy', axes[0, 0]), ('Precision', axes[0, 1]), 
                ('Recall', axes[1, 0]), ('F1', axes[1, 1])]
     
     for metric, ax in metrics:
-        x_pos = np.arange(len(models))
-        scores = []
-        for model in models:
-            model_data = results_df[results_df['Model'] == model]
-            scores.append(model_data[metric].values[0] if not model_data.empty else 0)
+        score = result[metric]
         
-        # Create bars with different patterns
-        bars = []
-        for i, (x, score) in enumerate(zip(x_pos, scores)):
-            style = bar_styles[i % len(bar_styles)]
-            bar = ax.bar(x, score, width=0.7, 
-                        color=style['color'], 
-                        alpha=style['alpha'],
-                        edgecolor=style['edgecolor'],
-                        linewidth=style['linewidth'],
-                        hatch=style['hatch'])
-            bars.append(bar[0])
+        # Create bar
+        bar = ax.bar(0, score, width=0.7, 
+                    color=base_color, 
+                    alpha=1.0,
+                    edgecolor='black',
+                    linewidth=2.5)
         
-        for i, v in enumerate(scores):
-            if v > 0:
-                ax.text(i, v + 1, f'{v:.1f}%', 
-                       ha='center', va='bottom', fontsize=20, fontweight='bold')
+        # Add value label
+        if score > 0:
+            ax.text(0, score + 1, f'{score:.1f}%', 
+                   ha='center', va='bottom', fontsize=20, fontweight='bold')
         
-        ax.set_title(f'{metric} Comparison', fontsize=20, fontweight='bold', pad=15)
-        ax.set_xlabel('Models', fontsize=18, fontweight='bold')
+        ax.set_title(f'{metric}', fontsize=20, fontweight='bold', pad=15)
         ax.set_ylabel(f'{metric} (%)', fontsize=18, fontweight='bold')
-        ax.set_xticks(x_pos)
-        ax.set_xticklabels(models, rotation=45, ha='right', fontsize=16)
+        ax.set_xticks([0])
+        ax.set_xticklabels([result['Model']], fontsize=16)
         ax.tick_params(axis='y', labelsize=16)
         ax.grid(axis='y', alpha=0.3, linestyle='--', linewidth=1.5)
         ax.set_ylim(0, 105)
@@ -486,26 +511,22 @@ def create_performance_visualization(results_df, output_dir):
     plt.close()
     print(f"📊 Visualization saved: {os.path.join(output_dir, 'model_comparison.png')}")
 
-def create_results_table(results_df, output_dir):
+def create_results_table(result, output_dir):
     """Create a professional results table"""
-    fig, ax = plt.subplots(figsize=(18, max(10, len(results_df) * 0.8 + 3)))
+    fig, ax = plt.subplots(figsize=(18, max(10, 3)))
     ax.axis('tight')
     ax.axis('off')
     
     # Prepare table data
     table_data = [['Model', 'Accuracy (%)', 'Precision (%)', 'Recall (%)', 'F1 Score (%)']]
     
-    # Sort by accuracy descending
-    sorted_df = results_df.sort_values('Accuracy', ascending=False)
-    
-    for _, row in sorted_df.iterrows():
-        table_data.append([
-            row['Model'],
-            f"{row['Accuracy']:.2f}",
-            f"{row['Precision']:.2f}",
-            f"{row['Recall']:.2f}",
-            f"{row['F1']:.2f}"
-        ])
+    table_data.append([
+        result['Model'],
+        f"{result['Accuracy']:.2f}",
+        f"{result['Precision']:.2f}",
+        f"{result['Recall']:.2f}",
+        f"{result['F1']:.2f}"
+    ])
     
     # Create table
     table = ax.table(
@@ -525,22 +546,21 @@ def create_results_table(results_df, output_dir):
         table[(0, i)].set_facecolor('#2E86AB')
         table[(0, i)].set_text_props(weight='bold', color='white', size=20)
     
-    # Data row styling - highlight models with ≥90% accuracy
-    for i in range(1, len(table_data)):
-        row_accuracy = float(table_data[i][1].replace('%', ''))
+    # Data row styling - highlight if ≥90% accuracy
+    row_accuracy = result['Accuracy']
+    
+    if row_accuracy >= 90:
+        row_color = '#E8F4F8'  # Light blue for high performers
+    else:
+        row_color = '#FFFFFF'
+    
+    for j in range(len(table_data[0])):
+        table[(1, j)].set_facecolor(row_color)
+        table[(1, j)].set_text_props(size=18)
         
-        if row_accuracy >= 90:
-            row_color = '#E8F4F8'  # Light blue for high performers
-        else:
-            row_color = '#F8F9FA' if i % 2 == 0 else '#FFFFFF'
-        
-        for j in range(len(table_data[0])):
-            table[(i, j)].set_facecolor(row_color)
-            table[(i, j)].set_text_props(size=18)
-            
-            # Bold accuracy if ≥90%
-            if j == 1 and row_accuracy >= 90:
-                table[(i, j)].set_text_props(size=18, weight='bold')
+        # Bold accuracy if ≥90%
+        if j == 1 and row_accuracy >= 90:
+            table[(1, j)].set_text_props(size=18, weight='bold')
     
     # Add borders
     for i in range(len(table_data)):
@@ -548,7 +568,7 @@ def create_results_table(results_df, output_dir):
             table[(i, j)].set_edgecolor('#CCCCCC')
             table[(i, j)].set_linewidth(1)
     
-    plt.title('BERT Model Performance Results Table', 
+    plt.title('TabPFN Model Performance Results Table', 
               fontsize=22, fontweight='bold', pad=30)
     plt.tight_layout()
     
@@ -564,15 +584,12 @@ def create_results_table(results_df, output_dir):
     
     # Also print console table
     print("\n" + "="*80)
-    print("BERT MODEL PERFORMANCE RESULTS TABLE")
+    print("TABPFN MODEL PERFORMANCE RESULTS TABLE")
     print("="*80)
     print(f"{'Model':<20} {'Accuracy':<15} {'Precision':<15} {'Recall':<15} {'F1 Score':<15}")
     print("-"*80)
-    
-    for _, row in sorted_df.iterrows():
-        print(f"{row['Model']:<20} {row['Accuracy']:<15.2f}% "
-              f"{row['Precision']:<15.2f}% {row['Recall']:<15.2f}% {row['F1']:<15.2f}%")
-    
+    print(f"{result['Model']:<20} {result['Accuracy']:<15.2f}% "
+          f"{result['Precision']:<15.2f}% {result['Recall']:<15.2f}% {result['F1']:<15.2f}%")
     print("="*80)
 
 # ============================================================================
@@ -580,18 +597,14 @@ def create_results_table(results_df, output_dir):
 # ============================================================================
 def main():
     print("="*80)
-    print("🎯 BERT-BASED SENTIMENT ANALYSIS TRAINING")
+    print("🎯 TABPFN SENTIMENT ANALYSIS TRAINING")
     print("="*80)
     
-    # Define models - RoBERTa is used as ground truth, so we evaluate BERT, ALBERT, DistilBERT, and TinyBERT
-    sentiment_models = {
-        "BERT": "nlptown/bert-base-multilingual-uncased-sentiment",
-        "DistilBERT": "distilbert-base-uncased-finetuned-sst-2-english",
-        "TinyBERT": "huawei-noah/TinyBERT_General_4L_312D",  # TinyBERT for sentiment analysis
-        "ALBERT": "textattack/albert-base-v2-SST-2",  # ALBERT fine-tuned for sentiment
-    }
+    if not TABPFN_AVAILABLE:
+        print("❌ TabPFN not available.")
+        return
     
-    # Force CPU to avoid mutex lock errors on macOS
+    # Force CPU
     device = "cpu"
     print(f"Using device: {device}\n")
     
@@ -605,11 +618,9 @@ def main():
     if df is None:
         return
     
-    # Use RoBERTa as ground truth for high accuracy (85-90%)
-    # RoBERTa is the most accurate 3-class model and will align better with other transformers
+    # Use RoBERTa as ground truth (same as bert_train.py and ml_train.py)
     print("🔍 Using RoBERTa as ground truth for high accuracy...")
     
-    # Load RoBERTa first to create ground truth
     roberta_model_name = "cardiffnlp/twitter-roberta-base-sentiment-latest"
     print("   📥 Loading RoBERTa for ground truth...")
     roberta_tokenizer, roberta_model = get_sentiment_model(roberta_model_name)
@@ -631,20 +642,16 @@ def main():
                 gc.collect()
                 continue
         
-        # Ensure we have predictions for all rows
         while len(ground_truth_predictions) < len(texts):
             ground_truth_predictions.append(-1)
         
-        # Use RoBERTa predictions as ground truth, fallback to keyword-based for invalid predictions
         df['ground_truth'] = ground_truth_predictions
         
-        # Fill invalid predictions with keyword-based detection
         invalid_mask = df['ground_truth'] == -1
         if invalid_mask.sum() > 0:
             print(f"   ⚠️  {invalid_mask.sum()} invalid RoBERTa predictions, using keyword-based fallback...")
             df.loc[invalid_mask, 'ground_truth'] = df.loc[invalid_mask, 'cleaned_text'].apply(detect_sentiment_advanced)
         
-        # Clean up RoBERTa model
         del roberta_model
         del roberta_tokenizer
         gc.collect()
@@ -672,174 +679,273 @@ def main():
     
     print(f"\n📊 Total samples: {len(texts)}")
     
-    # Process each model
-    all_results = []
+    # Split data
+    X_train, X_test, y_train, y_test = train_test_split(
+        texts, y_true, test_size=0.2, random_state=42, stratify=y_true
+    )
     
-    for model_key, model_name in sentiment_models.items():
-        print(f"\n" + "="*70)
-        print(f"🤖 PROCESSING {model_key.upper()}")
-        print("="*70)
-        
-        tokenizer = None
+    print(f"📊 Dataset split:")
+    print(f"   Training: {len(X_train)} samples")
+    print(f"   Testing: {len(X_test)} samples")
+    
+    # TabPFN can handle larger datasets with ignore_pretraining_limits=True
+    # We set TABPFN_ALLOW_CPU_LARGE_DATASET=1, so use all training samples
+    # Note: TabPFN is optimized for <= 1000 samples, but can work with more
+    # Performance may be slower with larger datasets on CPU
+    X_train_sampled, y_train_sampled = X_train, y_train
+    if len(X_train) > 1000:
+        print(f"\n⚠️  Training set size ({len(X_train)}) exceeds TabPFN's recommended limit (1000)")
+        print(f"   Using all {len(X_train)} samples (ignore_pretraining_limits=True)")
+        print(f"   Note: Training may take longer on CPU with larger datasets")
+    
+    # Create TF-IDF features
+    print(f"\n📥 Creating TF-IDF features...")
+    X_train_features, X_test_features, vectorizer = create_features(X_train_sampled, X_test)
+    
+    if X_train_features is None or X_test_features is None:
+        print(f"❌ Failed to create features")
+        return
+    
+    print(f"✅ Features created: Train shape {X_train_features.shape}, Test shape {X_test_features.shape}")
+    
+    # Scale features for TabPFN (TabPFN works better with standardized features)
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train_features)
+    X_test_scaled = scaler.transform(X_test_features)
+    
+    # Train TabPFN
+    print(f"\n🤖 Training TabPFN...")
+    
+    result = None
+    
+    if not TABPFN_AVAILABLE:
+        print("❌ TabPFN is not available. Please install it with: pip install tabpfn")
+        print("   Note: TabPFN 2.5+ requires Hugging Face authentication.")
+        print("   Visit: https://huggingface.co/Prior-Labs/tabpfn_2_5 to accept terms")
+        print("   Then run: hf auth login")
+        return
+    
+    try:
+        # TabPFN works best with smaller datasets, but can handle larger ones
+        # It's a prior-data fitted network, so it doesn't need traditional training
+        # Try different initialization methods based on version
         model = None
-        predictions = []
+        init_error = None
+        
+        # Try with N_ensemble_configurations (older versions)
+        try:
+            model = TabPFNClassifier(device='cpu', N_ensemble_configurations=32, ignore_pretraining_limits=True)
+        except TypeError:
+            # Fallback to basic initialization (newer versions)
+            try:
+                model = TabPFNClassifier(device='cpu', ignore_pretraining_limits=True)
+            except TypeError:
+                # Try without ignore_pretraining_limits if parameter doesn't exist
+                try:
+                    model = TabPFNClassifier(device='cpu')
+                except Exception as e:
+                    init_error = e
+                    model = None
+            except Exception as e:
+                init_error = e
+                model = None
+        
+        if model is None:
+            raise Exception(f"TabPFN initialization failed: {init_error}")
+        
+        # Fit the model (TabPFN uses prior data, so this is fast)
+        print("   Fitting TabPFN model...")
+        
+        # Patch the size validation in transformer_prediction_interface before fitting
+        original_validation = None
+        try:
+            import tabpfn.scripts.transformer_prediction_interface as tpi
+            # Find and patch the validation that raises the ValueError
+            # The check is at line 239 in transformer_prediction_interface.py
+            # We'll patch the fit method to skip the size check
+            if hasattr(tpi, 'TabPFNTransformer'):
+                original_fit_method = tpi.TabPFNTransformer.fit
+                
+                def patched_fit_method(self, X, y, **kwargs):
+                    # Temporarily disable the size check by patching the internal validation
+                    import tabpfn.base
+                    original_check = getattr(tabpfn.base, 'check_cpu_warning', None)
+                    
+                    def bypass_check(*args, **kwargs):
+                        pass
+                    
+                    if original_check:
+                        tabpfn.base.check_cpu_warning = bypass_check
+                    
+                    try:
+                        # Also need to bypass the check in transformer_prediction_interface
+                        # The ValueError is raised directly in the fit method
+                        # We'll catch it and continue
+                        try:
+                            result = original_fit_method(self, X, y, **kwargs)
+                            return result
+                        except ValueError as ve:
+                            error_str = str(ve).lower()
+                            if 'trainingsize' in error_str or '1024' in error_str:
+                                # Bypass by calling the parent implementation
+                                # This is a workaround - we'll call the actual fit logic
+                                return super(tpi.TabPFNTransformer, self).fit(X, y, **kwargs)
+                            raise
+                    finally:
+                        if original_check:
+                            tabpfn.base.check_cpu_warning = original_check
+                
+                # Apply the patch
+                tpi.TabPFNTransformer.fit = patched_fit_method
+                original_validation = original_fit_method
+        except Exception as patch_err:
+            # If patching fails, we'll handle it in the exception handler below
+            pass
         
         try:
-            # Load model with error handling
-            print(f"   📥 Loading {model_key}...")
-            # Add extra delay for TinyBERT to avoid mutex issues
-            if model_key == "TinyBERT":
-                time.sleep(0.5)
-            try:
-                tokenizer, model = get_sentiment_model(model_name)
-            except (SystemError, OSError, RuntimeError) as e:
-                if "mutex" in str(e).lower():
-                    print(f"   ⚠️  {model_key} failed to load (mutex error on macOS): {e}")
-                    print(f"   ⏭️  Skipping {model_key} and continuing with other models...")
-                    continue
-                else:
-                    raise
-            
-            if tokenizer and model:
-                print(f"   ✅ Model loaded successfully")
-                print(f"   🔮 Running predictions...")
-                
-                # Standard batch size for all models
-                batch_size = 8
-                
-                # Process in batches
-                for i in tqdm(range(0, len(texts), batch_size), desc=f"      {model_key}", leave=False):
-                    try:
-                        batch_texts = texts[i:i+batch_size]
-                        batch_preds = predict_sentiment_batch(batch_texts, tokenizer, model, model_name, device)
-                        predictions.extend(batch_preds)
-                        
-                        # Memory cleanup
-                        gc.collect()
-                    except Exception as e:
-                        print(f"\n         ⚠️  Error in batch {i//batch_size + 1}: {e}")
-                        predictions.extend([-1] * len(batch_texts))
-                        gc.collect()
-                        continue
-                
-                # Ensure we have predictions for all rows
-                while len(predictions) < len(texts):
-                    predictions.append(-1)
-                
-                # Filter out invalid predictions for metrics
-                y_true_array = np.array(y_true)
-                y_pred_array = np.array(predictions)
-                valid_mask = (y_pred_array != -1)
-                
-                if np.sum(valid_mask) > 0:
-                    y_true_valid = y_true_array[valid_mask]
-                    y_pred_valid = y_pred_array[valid_mask]
-                    
-                    # For binary models (DistilBERT, TinyBERT, ALBERT), use lenient evaluation
-                    # Since they can't predict neutral, we give full credit when GT is neutral
-                    # (treating it as "acceptable" since binary models can't distinguish neutral)
-                    if model_key in ["DistilBERT", "TinyBERT", "ALBERT"]:
-                        # Strategy: For neutral ground truth, give full credit (1.0) for any prediction
-                        # For non-neutral ground truth, require exact match
-                        neutral_gt_mask = (y_true_valid == 1)
-                        non_neutral_gt_mask = (y_true_valid != 1)
-                        
-                        # Exact matches for non-neutral cases
-                        non_neutral_correct = (y_true_valid[non_neutral_gt_mask] == y_pred_valid[non_neutral_gt_mask])
-                        non_neutral_count = np.sum(non_neutral_correct)
-                        
-                        # Full credit for neutral cases - any prediction is acceptable
-                        neutral_count = np.sum(neutral_gt_mask)
-                        
-                        # Calculate adjusted accuracy
-                        total_correct = non_neutral_count + neutral_count
-                        accuracy = (total_correct / len(y_true_valid)) * 100
-                        
-                        # For metrics, create adjusted predictions where neutral GT accepts any prediction
-                        adjusted_pred = y_pred_valid.copy()
-                        # Neutral GT cases are already handled by giving full credit
-                        # For metrics calculation, we'll use the predictions as-is but weight neutral cases
-                        
-                        precision = precision_score(y_true_valid, adjusted_pred, average='weighted', zero_division=0) * 100
-                        recall = recall_score(y_true_valid, adjusted_pred, average='weighted', zero_division=0) * 100
-                        f1 = f1_score(y_true_valid, adjusted_pred, average='weighted', zero_division=0) * 100
-                    else:
-                        # For 3-class models (BERT), use exact match
-                        accuracy = accuracy_score(y_true_valid, y_pred_valid) * 100
-                        precision = precision_score(y_true_valid, y_pred_valid, average='weighted', zero_division=0) * 100
-                        recall = recall_score(y_true_valid, y_pred_valid, average='weighted', zero_division=0) * 100
-                        f1 = f1_score(y_true_valid, y_pred_valid, average='weighted', zero_division=0) * 100
-                    
-                    all_results.append({
-                        'Model': model_key,
-                        'Accuracy': accuracy,
-                        'Precision': precision,
-                        'Recall': recall,
-                        'F1': f1
-                    })
-                    
-                    print(f"   ✅ Accuracy: {accuracy:.2f}%, F1: {f1:.2f}%")
-                    
-                    # Generate confusion matrix with accuracy
-                    print(f"   📊 Creating confusion matrix...")
-                    create_confusion_matrix(y_true, predictions, model_key, Config.CONFUSION_MATRIX_DIR, accuracy=accuracy)
-                else:
-                    print(f"   ❌ No valid predictions generated")
-                    
+            # Try to fit with all samples
+            model.fit(X_train_scaled, y_train_sampled)
+        except ValueError as fit_error:
+            # Check if it's the dataset size warning
+            error_str = str(fit_error).lower()
+            if 'trainingsize' in error_str or '1024' in error_str or 'overwrite_warning' in error_str:
+                print(f"   ⚠️  TabPFN hard limit: This version requires <= 1024 training samples.")
+                print(f"   📊 Using stratified sampling to 1024 samples to proceed...")
+                print(f"   💡 Note: To use all {len(X_train_sampled)} samples, you may need a different TabPFN version or GPU.")
+                from sklearn.utils import resample
+                X_train_fit, y_train_fit = resample(
+                    X_train_scaled, y_train_sampled,
+                    n_samples=1024,
+                    random_state=42,
+                    stratify=y_train_sampled
+                )
+                model.fit(X_train_fit, y_train_fit)
+            elif '403' in error_str or 'forbidden' in error_str or 'authentication' in error_str or 'gated' in error_str:
+                raise Exception("TabPFN authentication required")
             else:
-                print(f"   ❌ Failed to load model")
-                
-        except Exception as e:
-            print(f"   ❌ Error processing {model_key}: {e}")
+                raise
+        except Exception as fit_error:
+            # Check if it's an authentication/download error
+            error_str = str(fit_error).lower()
+            if '403' in error_str or 'forbidden' in error_str or 'authentication' in error_str or 'gated' in error_str:
+                raise Exception("TabPFN authentication required")
+            else:
+                raise
+        finally:
+            # Restore original method if we patched it
+            if original_validation:
+                try:
+                    import tabpfn.scripts.transformer_prediction_interface as tpi
+                    tpi.TabPFNTransformer.fit = original_validation
+                except Exception:
+                    pass
+        
+        # Predict
+        print("   Making predictions...")
+        y_pred = model.predict(X_test_scaled)
+        
+        # Calculate metrics
+        accuracy = accuracy_score(y_test, y_pred) * 100
+        precision = precision_score(y_test, y_pred, average='weighted', zero_division=0) * 100
+        recall = recall_score(y_test, y_pred, average='weighted', zero_division=0) * 100
+        f1 = f1_score(y_test, y_pred, average='weighted', zero_division=0) * 100
+        
+        result = {
+            'Model': 'TabPFN',
+            'Accuracy': accuracy,
+            'Precision': precision,
+            'Recall': recall,
+            'F1': f1
+        }
+        
+        print(f"✅ Accuracy: {accuracy:.2f}%, F1: {f1:.2f}%")
+        
+        # Generate confusion matrix
+        print(f"📊 Creating confusion matrix...")
+        create_confusion_matrix(y_test, y_pred, 'TabPFN', Config.CONFUSION_MATRIX_DIR, accuracy=accuracy)
+        
+        # Cleanup
+        del model
+        gc.collect()
+        
+    except Exception as e:
+        error_msg = str(e)
+        error_str_lower = error_msg.lower()
+        
+        # Check if it's an authentication/download error
+        is_auth_error = (
+            "huggingface" in error_str_lower or 
+            "gated" in error_str_lower or 
+            "authentication" in error_str_lower or
+            "403" in error_msg or
+            "forbidden" in error_str_lower or
+            "tabpfn authentication required" in error_str_lower
+        )
+        
+        if is_auth_error:
+            print("\n" + "="*80)
+            print("⚠️  TABPFN AUTHENTICATION REQUIRED")
+            print("="*80)
+            print("TabPFN 2.5+ requires Hugging Face authentication and is a gated model.")
+            print("\n📋 SOLUTION OPTIONS:")
+            print("\n1. SET UP HUGGING FACE AUTHENTICATION:")
+            print("   a. Visit https://huggingface.co/Prior-Labs/tabpfn_2_5")
+            print("      and accept the terms of use")
+            print("   b. Log in via command line:")
+            print("      hf auth login")
+            print("   c. Make sure your token has 'read' access to gated repositories")
+            print("      (check fine-grained token settings if using tokens)")
+            print("\n2. USE OLDER VERSION (NO AUTH REQUIRED):")
+            print("   Install TabPFN 0.1.x which doesn't require authentication:")
+            print("   pip install 'tabpfn<0.2'")
+            print("\n3. FOR COMMERCIAL USE:")
+            print("   Contact sales@priorlabs.ai for alternative download options")
+            print("\nFor detailed instructions, see:")
+            print("https://docs.priorlabs.ai/how-to-access-gated-models")
+            print("="*80)
+        else:
+            print(f"❌ Error training TabPFN: {error_msg}")
             import traceback
             traceback.print_exc()
-        finally:
-            # Cleanup
-            if model is not None:
-                del model
-            if tokenizer is not None:
-                del tokenizer
-            gc.collect()
-            time.sleep(1.0)
+        return
+    
+    # Cleanup features
+    del X_train_features, X_test_features, X_train_scaled, X_test_scaled, vectorizer
+    gc.collect()
+    time.sleep(1.0)
     
     # Create results visualization
-    if all_results:
+    if result:
         print("\n" + "="*80)
         print("📊 GENERATING RESULTS")
         print("="*80)
         
-        results_df = pd.DataFrame(all_results)
-        
         # Save CSV
         output_dir = os.path.join(Config.OUTPUT_DIR, 'training_results')
         os.makedirs(output_dir, exist_ok=True)
-        results_df.to_csv(os.path.join(output_dir, 'bert_model_comparison_table.csv'), index=False)
+        results_df = pd.DataFrame([result])
+        results_df.to_csv(os.path.join(output_dir, 'tabpfn_model_comparison_table.csv'), index=False)
         
         # Create visualization
-        create_performance_visualization(results_df, Config.CONFUSION_MATRIX_DIR)
+        create_performance_visualization(result, Config.CONFUSION_MATRIX_DIR)
         
         # Create results table
-        create_results_table(results_df, Config.CONFUSION_MATRIX_DIR)
+        create_results_table(result, Config.CONFUSION_MATRIX_DIR)
         
         # Print summary
         print("\n" + "="*80)
         print("✅ TRAINING COMPLETE!")
         print("="*80)
-        print(f"📊 Total models processed: {len(results_df)}")
-        print(f"📈 Best accuracy: {results_df['Accuracy'].max():.2f}%")
-        best_row = results_df.loc[results_df['Accuracy'].idxmax()]
-        print(f"🏆 Best model: {best_row['Model']}")
-        print(f"   Accuracy: {best_row['Accuracy']:.2f}%")
-        print(f"   F1 Score: {best_row['F1']:.2f}%")
+        print(f"🏆 Model: {result['Model']}")
+        print(f"   Accuracy: {result['Accuracy']:.2f}%")
+        print(f"   Precision: {result['Precision']:.2f}%")
+        print(f"   Recall: {result['Recall']:.2f}%")
+        print(f"   F1 Score: {result['F1']:.2f}%")
         
-        # Models above 90%
-        above_90 = results_df[results_df['Accuracy'] >= 90]
-        if len(above_90) > 0:
-            print(f"\n🎯 Models with ≥90% accuracy: {len(above_90)}")
-            for _, row in above_90.iterrows():
-                print(f"   - {row['Model']}: {row['Accuracy']:.2f}%")
+        if result['Accuracy'] >= 90:
+            print(f"\n🎯 Model reached ≥90% accuracy!")
         else:
-            print(f"\n⚠️  No models reached 90% accuracy. Best: {results_df['Accuracy'].max():.2f}%")
+            print(f"\n⚠️  Model accuracy: {result['Accuracy']:.2f}%")
         
         print(f"\n📁 Results saved in: {output_dir}")
         print(f"📊 Confusion matrices saved in: {Config.CONFUSION_MATRIX_DIR}")
