@@ -58,14 +58,6 @@ checkpoints/
 # *.xlsx
 # *.json
 
-# Generated images/charts
-*.png
-*.jpg
-*.jpeg
-*.gif
-*.pdf
-*.svg
-
 # Logs
 *.log
 logs/

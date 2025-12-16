@@ -67,7 +67,7 @@ warnings.filterwarnings("ignore")
 # Configuration
 # ============================================================================
 class Config:
-    DATA_DIR = 'data'
+    DATA_DIR = '../dataset'
     OUTPUT_DIR = 'outputs'
     CONFUSION_MATRIX_DIR = os.path.join(OUTPUT_DIR, 'ml_confusion_matrix')
 
@@ -926,11 +926,6 @@ def main():
         print("="*80)
         
         results_df = pd.DataFrame(all_results)
-        
-        # Save CSV
-        output_dir = os.path.join(Config.OUTPUT_DIR, 'training_results')
-        os.makedirs(output_dir, exist_ok=True)
-        results_df.to_csv(os.path.join(output_dir, 'ml_model_comparison_table.csv'), index=False)
         
         # Create visualization
         create_performance_visualization(results_df, Config.CONFUSION_MATRIX_DIR)

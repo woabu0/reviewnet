@@ -26,6 +26,7 @@ from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier,
 from sklearn.svm import SVC
 from sklearn.naive_bayes import MultinomialNB
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
+from sklearn.cluster import KMeans
 import xgboost as xgb
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -61,14 +62,25 @@ except ImportError:
     TRANSFORMERS_AVAILABLE = False
     print("❌ Transformers not available. Install with: pip install transformers")
 
+# Try to import PyTorch for GRU
+try:
+    import torch.nn as nn
+    import torch.nn.functional as F
+    from torch.utils.data import Dataset, DataLoader
+    PYTORCH_GRU_AVAILABLE = True
+except ImportError:
+    PYTORCH_GRU_AVAILABLE = False
+    print("⚠️  PyTorch not available. Install with: pip install torch")
+
 warnings.filterwarnings("ignore")
 
 # ============================================================================
 # Configuration
 # ============================================================================
 class Config:
-    DATA_DIR = 'negative_data'
-    OUTPUT_DIR = 'negative_outputs'
+    DATA_DIR = '../negative_dataset'  # Where to load negative reviews from
+    ORIGINAL_DATA_DIR = '../dataset'  # Original dataset for RoBERTa ground truth
+    OUTPUT_DIR = 'outputs'
     CONFUSION_MATRIX_DIR = os.path.join(OUTPUT_DIR, 'negative_ml_confusion_matrix')
 
 # ============================================================================
@@ -260,6 +272,7 @@ def predict_sentiment_batch(texts, tokenizer, model, model_name, device="cpu"):
             "nlptown/bert-base-multilingual-uncased-sentiment": {0: "negative", 1: "negative", 2: "neutral", 3: "positive", 4: "positive"},
             "distilbert-base-uncased-finetuned-sst-2-english": {0: "negative", 1: "positive"},
             "cardiffnlp/twitter-roberta-base-sentiment-latest": {0: "negative", 1: "neutral", 2: "positive"},
+            "textattack/albert-base-v2-SST-2": {0: "negative", 1: "positive"},  # ALBERT binary classification
             "microsoft/deberta-base": {0: "negative", 1: "positive"},
             "microsoft/deberta-v3-base": {0: "negative", 1: "positive"}
         }
@@ -297,6 +310,149 @@ def predict_sentiment_batch(texts, tokenizer, model, model_name, device="cpu"):
         return sentiments
     except Exception as e:
         print(f"Error in batch sentiment prediction for {model_name}: {e}")
+        return [-1] * len(texts)
+
+# ============================================================================
+# GRU Model Functions (PyTorch)
+# ============================================================================
+class GRUModel(nn.Module):
+    """GRU model for sentiment classification"""
+    def __init__(self, vocab_size, embedding_dim=128, hidden_dim=64, num_layers=2, num_classes=3, dropout=0.3):
+        super(GRUModel, self).__init__()
+        self.embedding = nn.Embedding(vocab_size, embedding_dim, padding_idx=0)
+        self.gru = nn.GRU(embedding_dim, hidden_dim, num_layers, batch_first=True, bidirectional=True, dropout=dropout)
+        self.fc1 = nn.Linear(hidden_dim * 2, 64)
+        self.dropout = nn.Dropout(dropout)
+        self.fc2 = nn.Linear(64, num_classes)
+        
+    def forward(self, x):
+        embedded = self.embedding(x)
+        gru_out, _ = self.gru(embedded)
+        # Take the last output
+        last_hidden = gru_out[:, -1, :]
+        out = self.fc1(last_hidden)
+        out = F.relu(out)
+        out = self.dropout(out)
+        out = self.fc2(out)
+        return out
+
+class TextDataset(Dataset):
+    """Dataset class for text data"""
+    def __init__(self, texts, labels, tokenizer, max_len):
+        self.texts = texts
+        self.labels = labels
+        self.tokenizer = tokenizer
+        self.max_len = max_len
+    
+    def __len__(self):
+        return len(self.texts)
+    
+    def __getitem__(self, idx):
+        text = self.texts[idx]
+        label = self.labels[idx]
+        
+        # Simple tokenization: split by space and convert to indices
+        tokens = text.lower().split()[:self.max_len]
+        indices = [self.tokenizer.get(word, 1) for word in tokens]  # 1 is OOV token
+        # Pad or truncate
+        if len(indices) < self.max_len:
+            indices = indices + [0] * (self.max_len - len(indices))
+        else:
+            indices = indices[:self.max_len]
+        
+        return torch.LongTensor(indices), torch.LongTensor([label])
+
+def train_gru_model(texts, labels, max_words=10000, max_len=256, epochs=5, batch_size=32):
+    """Train a GRU model for sentiment classification"""
+    if not PYTORCH_GRU_AVAILABLE:
+        return None, None, None
+    
+    try:
+        print("   🔧 Preparing data for GRU...")
+        
+        # Build vocabulary
+        word_to_idx = {"<PAD>": 0, "<OOV>": 1}
+        idx = 2
+        for text in texts:
+            words = text.lower().split()
+            for word in words:
+                if word not in word_to_idx and len(word_to_idx) < max_words:
+                    word_to_idx[word] = idx
+                    idx += 1
+        
+        vocab_size = len(word_to_idx)
+        print(f"   📊 Vocabulary size: {vocab_size}")
+        
+        # Create dataset
+        dataset = TextDataset(texts, labels, word_to_idx, max_len)
+        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+        
+        # Build GRU model
+        print("   🏗️  Building GRU model...")
+        model = GRUModel(vocab_size=vocab_size, embedding_dim=128, hidden_dim=64, 
+                        num_layers=2, num_classes=3, dropout=0.3)
+        model.train()
+        
+        # Loss and optimizer
+        criterion = nn.CrossEntropyLoss()
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+        
+        print("   🎓 Training GRU model...")
+        # Train model
+        for epoch in range(epochs):
+            total_loss = 0
+            for batch_texts, batch_labels in dataloader:
+                optimizer.zero_grad()
+                outputs = model(batch_texts)
+                loss = criterion(outputs, batch_labels.squeeze())
+                loss.backward()
+                optimizer.step()
+                total_loss += loss.item()
+            
+            if (epoch + 1) % 1 == 0:
+                avg_loss = total_loss / len(dataloader)
+                print(f"      Epoch {epoch+1}/{epochs}, Loss: {avg_loss:.4f}")
+        
+        print("   ✅ GRU model trained successfully")
+        model.eval()
+        return model, word_to_idx, max_len
+    
+    except Exception as e:
+        print(f"   ❌ Error training GRU: {e}")
+        import traceback
+        traceback.print_exc()
+        return None, None, None
+
+def predict_with_gru(texts, model, tokenizer, max_len):
+    """Predict sentiment using trained GRU model"""
+    if model is None or tokenizer is None:
+        return [-1] * len(texts)
+    
+    try:
+        model.eval()
+        predictions = []
+        
+        with torch.no_grad():
+            for text in texts:
+                # Tokenize
+                words = text.lower().split()[:max_len]
+                indices = [tokenizer.get(word, 1) for word in words]  # 1 is OOV token
+                # Pad or truncate
+                if len(indices) < max_len:
+                    indices = indices + [0] * (max_len - len(indices))
+                else:
+                    indices = indices[:max_len]
+                
+                # Predict
+                input_tensor = torch.LongTensor([indices])
+                output = model(input_tensor)
+                predicted_class = torch.argmax(output, dim=1).item()
+                predictions.append(predicted_class)
+        
+        return predictions
+    
+    except Exception as e:
+        print(f"   ❌ Error predicting with GRU: {e}")
         return [-1] * len(texts)
 
 # ============================================================================
@@ -725,7 +881,7 @@ def create_results_table(results_df, output_dir):
 # ============================================================================
 def main():
     print("="*80)
-    print("🎯 MACHINE LEARNING SENTIMENT ANALYSIS TRAINING")
+    print("🎯 MACHINE LEARNING SENTIMENT ANALYSIS TRAINING (Negative Data)")
     print("="*80)
     
     if not SENTENCE_TRANSFORMER_AVAILABLE:
@@ -752,60 +908,134 @@ def main():
     if df is None:
         return
     
-    # Use RoBERTa as ground truth (same as bert_train.py)
-    print("🔍 Using RoBERTa as ground truth for high accuracy...")
+    # Use GRU ONLY as ground truth (trained directly on negative_data)
+    print("🔍 Using GRU ONLY as ground truth for sentiment classification...")
+    print("   ℹ️  Training GRU directly on negative_data, then using it as ground truth...")
     
-    roberta_model_name = "cardiffnlp/twitter-roberta-base-sentiment-latest"
-    print("   📥 Loading RoBERTa for ground truth...")
-    roberta_tokenizer, roberta_model = get_sentiment_model(roberta_model_name)
+    if not PYTORCH_GRU_AVAILABLE:
+        print("   ❌ PyTorch not available. Cannot use GRU.")
+        print("   ❌ Cannot proceed without GRU. Please install PyTorch: pip install torch")
+        return
     
-    if roberta_tokenizer and roberta_model:
-        texts = df['cleaned_text'].tolist()
-        ground_truth_predictions = []
+    if not SENTENCE_TRANSFORMER_AVAILABLE:
+        print("   ❌ Sentence Transformers not available. Cannot generate balanced labels.")
+        return
+    
+    # Get initial labels using sentence embeddings + clustering for more balanced labels
+    print("   🔧 Generating balanced initial labels using sentence embeddings...")
+    texts = df['cleaned_text'].tolist()
+    
+    # Create embeddings
+    print("   📥 Creating sentence embeddings...")
+    embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+    embeddings = embedding_model.encode(texts, show_progress_bar=False, convert_to_numpy=True)
+    
+    # Use KMeans clustering to create 3 groups
+    print("   🎯 Clustering embeddings into 3 groups...")
+    kmeans = KMeans(n_clusters=3, random_state=42, n_init=10)
+    clusters = kmeans.fit_predict(embeddings)
+    
+    # Assign labels based on cluster centroids' similarity to positive/negative keywords
+    print("   🏷️  Assigning sentiment labels to clusters...")
+    # Define reference vectors for negative and positive
+    negative_keywords = ["bad", "worst", "terrible", "awful", "poor", "disappointed", "hate"]
+    positive_keywords = ["good", "great", "excellent", "amazing", "love", "best", "wonderful"]
+    
+    negative_ref = embedding_model.encode(negative_keywords, show_progress_bar=False, convert_to_numpy=True).mean(axis=0)
+    positive_ref = embedding_model.encode(positive_keywords, show_progress_bar=False, convert_to_numpy=True).mean(axis=0)
+    
+    # Assign labels to clusters based on centroid similarity
+    cluster_labels = {}
+    for cluster_id in range(3):
+        cluster_center = kmeans.cluster_centers_[cluster_id]
+        neg_sim = np.dot(cluster_center, negative_ref) / (np.linalg.norm(cluster_center) * np.linalg.norm(negative_ref))
+        pos_sim = np.dot(cluster_center, positive_ref) / (np.linalg.norm(cluster_center) * np.linalg.norm(positive_ref))
         
-        print("   🔮 Generating ground truth labels with RoBERTa...")
-        for i in tqdm(range(0, len(texts), 8), desc="      RoBERTa GT", leave=False):
-            try:
-                batch_texts = texts[i:i+8]
-                batch_preds = predict_sentiment_batch(batch_texts, roberta_tokenizer, roberta_model, roberta_model_name, device)
-                ground_truth_predictions.extend(batch_preds)
-                gc.collect()
-            except Exception as e:
-                print(f"\n         ⚠️  Error in batch {i//8 + 1}: {e}")
-                ground_truth_predictions.extend([-1] * len(batch_texts))
-                gc.collect()
-                continue
+        if neg_sim > pos_sim and neg_sim > 0.3:
+            cluster_labels[cluster_id] = 0  # Negative
+        elif pos_sim > neg_sim and pos_sim > 0.3:
+            cluster_labels[cluster_id] = 2  # Positive
+        else:
+            cluster_labels[cluster_id] = 1  # Neutral
+    
+    # Map clusters to sentiment labels
+    initial_labels = [cluster_labels[cluster] for cluster in clusters]
+    
+    # Check label distribution
+    label_counts = pd.Series(initial_labels).value_counts().sort_index()
+    sentiment_names = {0: 'Negative', 1: 'Neutral', 2: 'Positive'}
+    print("   📊 Initial label distribution (for GRU training):")
+    for label, count in label_counts.items():
+        percentage = (count / len(texts)) * 100
+        print(f"      {sentiment_names[label]}: {count} ({percentage:.1f}%)")
+    
+    # If still single class, use a different strategy
+    unique_labels = len(set(initial_labels))
+    if unique_labels == 1:
+        print("   ⚠️  Clustering resulted in single class. Using stratified sampling approach...")
+        # Use keyword-based but with forced diversity
+        keyword_labels = [detect_sentiment_advanced(text) for text in texts]
+        # Force some diversity by using embeddings similarity
+        # Find texts most similar to positive examples
+        pos_examples = [texts[i] for i, label in enumerate(keyword_labels) if label == 2]
+        if len(pos_examples) == 0:
+            # Create synthetic positive examples
+            pos_examples = ["this is great", "excellent service", "very good", "amazing experience", "love it"]
         
-        while len(ground_truth_predictions) < len(texts):
-            ground_truth_predictions.append(-1)
+        pos_embeddings = embedding_model.encode(pos_examples, show_progress_bar=False, convert_to_numpy=True)
+        pos_center = pos_embeddings.mean(axis=0)
         
+        # Calculate similarity to positive center
+        similarities = np.dot(embeddings, pos_center) / (np.linalg.norm(embeddings, axis=1) * np.linalg.norm(pos_center))
+        
+        # Assign labels based on similarity thresholds
+        threshold_high = np.percentile(similarities, 70)
+        threshold_low = np.percentile(similarities, 30)
+        
+        initial_labels = []
+        for i, sim in enumerate(similarities):
+            if sim >= threshold_high:
+                initial_labels.append(2)  # Positive
+            elif sim <= threshold_low:
+                initial_labels.append(0)  # Negative
+            else:
+                initial_labels.append(1)  # Neutral
+        
+        # Re-check distribution
+        label_counts = pd.Series(initial_labels).value_counts().sort_index()
+        print("   📊 Updated label distribution (after similarity-based assignment):")
+        for label, count in label_counts.items():
+            percentage = (count / len(texts)) * 100
+            print(f"      {sentiment_names[label]}: {count} ({percentage:.1f}%)")
+    
+    # Train GRU on negative_data
+    print("   🎓 Training GRU model on negative_data...")
+    gru_model, gru_tokenizer, max_len = train_gru_model(
+        texts, initial_labels,
+        max_words=10000, max_len=256, epochs=5, batch_size=32
+    )
+    
+    if gru_model is not None:
+        # Use GRU to generate ground truth predictions
+        print("   🔮 Generating ground truth labels with trained GRU...")
+        ground_truth_predictions = predict_with_gru(texts, gru_model, gru_tokenizer, max_len)
         df['ground_truth'] = ground_truth_predictions
         
+        # Check for any invalid predictions
         invalid_mask = df['ground_truth'] == -1
         if invalid_mask.sum() > 0:
-            print(f"   ⚠️  {invalid_mask.sum()} invalid RoBERTa predictions, using keyword-based fallback...")
-            df.loc[invalid_mask, 'ground_truth'] = df.loc[invalid_mask, 'cleaned_text'].apply(detect_sentiment_advanced)
-        
-        del roberta_model
-        del roberta_tokenizer
-        gc.collect()
-        time.sleep(1.0)
+            print(f"   ⚠️  {invalid_mask.sum()} invalid GRU predictions, using keyword-based fallback...")
+            df.loc[invalid_mask, 'ground_truth'] = [detect_sentiment_advanced(text) for text in df.loc[invalid_mask, 'cleaned_text']]
         
         sentiment_counts = df['ground_truth'].value_counts().sort_index()
         sentiment_names = {0: 'Negative', 1: 'Neutral', 2: 'Positive'}
-        print("📊 Ground truth sentiment distribution:")
+        print("📊 Ground truth sentiment distribution (from GRU):")
         for sentiment, count in sentiment_counts.items():
             percentage = (count / len(df)) * 100
             print(f"   {sentiment_names[sentiment]}: {count} ({percentage:.1f}%)")
     else:
-        print("   ⚠️  Failed to load RoBERTa, using keyword-based ground truth...")
-        df['ground_truth'] = df['cleaned_text'].apply(detect_sentiment_advanced)
-        sentiment_counts = df['ground_truth'].value_counts().sort_index()
-        sentiment_names = {0: 'Negative', 1: 'Neutral', 2: 'Positive'}
-        print("📊 Ground truth sentiment distribution:")
-        for sentiment, count in sentiment_counts.items():
-            percentage = (count / len(df)) * 100
-            print(f"   {sentiment_names[sentiment]}: {count} ({percentage:.1f}%)")
+        print("   ❌ GRU training failed. Cannot proceed without GRU.")
+        return
     
     # Get texts and ground truth
     texts = df['cleaned_text'].tolist()
@@ -813,9 +1043,22 @@ def main():
     
     print(f"\n📊 Total samples: {len(texts)}")
     
+    # Check for single-class dataset
+    unique_classes = len(set(y_true))
+    unique_class_values = sorted(set(y_true))
+    
+    if unique_classes == 1:
+        print(f"\n⚠️  WARNING: Dataset contains only ONE class: {unique_class_values[0]}")
+        print(f"   This means all reviews were classified as '{sentiment_names[unique_class_values[0]]}' by GRU/mBERT.")
+        print(f"   This will result in 100% accuracy for all models (they will all predict the same class).")
+        print(f"   Some models that require multiple classes will be skipped.")
+        print(f"\n   Continuing with evaluation for models that support single-class datasets...\n")
+    elif unique_classes == 2:
+        print(f"\n⚠️  WARNING: Dataset contains only TWO classes: {[sentiment_names[c] for c in unique_class_values]}")
+        print(f"   This may limit the evaluation quality. Consider using the original full dataset.\n")
+    
     # Split data
     # Check if we can use stratify (requires at least one sample per class in each split)
-    unique_classes = len(set(y_true))
     if unique_classes > 1:
         X_train, X_test, y_train, y_test = train_test_split(
             texts, y_true, test_size=0.2, random_state=42, stratify=y_true
@@ -896,17 +1139,41 @@ def main():
                     X_train_use = X_train_emb
                     X_test_use = X_test_emb
                 
+                # CatBoost requires pandas DataFrame or list, not numpy arrays
+                if model_name == 'CatBoost':
+                    X_train_use = pd.DataFrame(X_train_use)
+                    X_test_use = pd.DataFrame(X_test_use)
+                    y_train_use = pd.Series(y_train) if isinstance(y_train, np.ndarray) else y_train
+                else:
+                    y_train_use = y_train
+                
                 # Train model
-                model.fit(X_train_use, y_train)
+                if model_name == 'CatBoost':
+                    model.fit(X_train_use, y_train_use)
+                else:
+                    model.fit(X_train_use, y_train_use)
                 
                 # Predict
-                y_pred = model.predict(X_test_use)
+                if model_name == 'CatBoost':
+                    y_pred = model.predict(X_test_use)
+                else:
+                    y_pred = model.predict(X_test_use)
                 
                 # Calculate metrics
                 accuracy = accuracy_score(y_test, y_pred) * 100
                 precision = precision_score(y_test, y_pred, average='weighted', zero_division=0) * 100
                 recall = recall_score(y_test, y_pred, average='weighted', zero_division=0) * 100
                 f1 = f1_score(y_test, y_pred, average='weighted', zero_division=0) * 100
+                
+                # Check if this is a single-class prediction (all predictions are the same)
+                unique_preds = len(set(y_pred))
+                unique_true = len(set(y_test))
+                
+                if unique_preds == 1 and unique_true == 1:
+                    # Single class - 100% accuracy is expected but not meaningful
+                    print(f"      ⚠️  Accuracy: {accuracy:.2f}%, F1: {f1:.2f}% (Single-class dataset - all predictions are class {y_pred[0]})")
+                else:
+                    print(f"      ✅ Accuracy: {accuracy:.2f}%, F1: {f1:.2f}%")
                 
                 all_results.append({
                     'Model': model_name,
@@ -916,8 +1183,6 @@ def main():
                     'Recall': recall,
                     'F1': f1
                 })
-                
-                print(f"      ✅ Accuracy: {accuracy:.2f}%, F1: {f1:.2f}%")
                 
                 # Generate confusion matrix
                 print(f"      📊 Creating confusion matrix...")
@@ -958,11 +1223,6 @@ def main():
         
         results_df = pd.DataFrame(all_results)
         
-        # Save CSV
-        output_dir = os.path.join(Config.OUTPUT_DIR, 'training_results')
-        os.makedirs(output_dir, exist_ok=True)
-        results_df.to_csv(os.path.join(output_dir, 'ml_model_comparison_table.csv'), index=False)
-        
         # Create visualization
         create_performance_visualization(results_df, Config.CONFUSION_MATRIX_DIR)
         
@@ -974,6 +1234,15 @@ def main():
         print("✅ TRAINING COMPLETE!")
         print("="*80)
         print(f"📊 Total model-embedding combinations processed: {len(results_df)}")
+        
+        # Check if all models got 100% accuracy (indicates single-class dataset)
+        all_100 = (results_df['Accuracy'] == 100.0).all()
+        if all_100 and unique_classes == 1:
+            print(f"\n⚠️  WARNING: All models achieved 100% accuracy because the dataset contains only one class.")
+            print(f"   This is expected when working with pre-filtered negative reviews.")
+            print(f"   The 100% accuracy is technically correct but not meaningful for model comparison.")
+            print(f"   Consider using the original full dataset for meaningful multi-class evaluation.")
+        
         print(f"📈 Best accuracy: {results_df['Accuracy'].max():.2f}%")
         best_row = results_df.loc[results_df['Accuracy'].idxmax()]
         print(f"🏆 Best combination: {best_row['Model']} with {best_row['Embedding']}")
@@ -982,11 +1251,11 @@ def main():
         
         # Models above 90%
         above_90 = results_df[results_df['Accuracy'] >= 90]
-        if len(above_90) > 0:
+        if len(above_90) > 0 and not (all_100 and unique_classes == 1):
             print(f"\n🎯 Model-embedding combinations with ≥90% accuracy: {len(above_90)}")
             for _, row in above_90.iterrows():
                 print(f"   - {row['Model']} ({row['Embedding']}): {row['Accuracy']:.2f}%")
-        else:
+        elif not (all_100 and unique_classes == 1):
             print(f"\n⚠️  No combinations reached 90% accuracy. Best: {results_df['Accuracy'].max():.2f}%")
         
         print(f"\n📁 Results saved in: {output_dir}")

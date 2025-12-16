@@ -58,7 +58,7 @@ except ImportError:
         TABPFN_AVAILABLE = False
         print("⚠️  TabPFN not available. Install with: pip install tabpfn")
 
-# Try to import transformers for ground truth
+# Try to import transformers for BERT ground truth
 try:
     from transformers import AutoTokenizer, AutoModelForSequenceClassification
     TRANSFORMERS_AVAILABLE = True
@@ -72,8 +72,8 @@ warnings.filterwarnings("ignore")
 # Configuration
 # ============================================================================
 class Config:
-    DATA_DIR = 'negative_data'
-    OUTPUT_DIR = 'negative_outputs'
+    DATA_DIR = '../negative_dataset'
+    OUTPUT_DIR = 'outputs'
     CONFUSION_MATRIX_DIR = os.path.join(OUTPUT_DIR, 'negative_tabpfn_confusion_matrix')
 
 # ============================================================================
@@ -214,7 +214,7 @@ def detect_sentiment_advanced(text):
         return 1  # Neutral
 
 # ============================================================================
-# Ground Truth Generation (Using RoBERTa)
+# Ground Truth Generation (Using BERT)
 # ============================================================================
 def get_sentiment_model(model_name):
     """Load sentiment model with error handling"""
@@ -597,7 +597,7 @@ def create_results_table(result, output_dir):
 # ============================================================================
 def main():
     print("="*80)
-    print("🎯 TABPFN SENTIMENT ANALYSIS TRAINING")
+    print("🎯 TABPFN SENTIMENT ANALYSIS TRAINING (Negative Data)")
     print("="*80)
     
     if not TABPFN_AVAILABLE:
@@ -618,22 +618,22 @@ def main():
     if df is None:
         return
     
-    # Use RoBERTa as ground truth (same as bert_train.py and ml_train.py)
-    print("🔍 Using RoBERTa as ground truth for high accuracy...")
+    # Use BERT as ground truth (multi-class BERT model)
+    print("🔍 Using BERT as ground truth for sentiment classification...")
     
-    roberta_model_name = "cardiffnlp/twitter-roberta-base-sentiment-latest"
-    print("   📥 Loading RoBERTa for ground truth...")
-    roberta_tokenizer, roberta_model = get_sentiment_model(roberta_model_name)
+    bert_model_name = "nlptown/bert-base-multilingual-uncased-sentiment"
+    print("   📥 Loading BERT for ground truth...")
+    bert_tokenizer, bert_model = get_sentiment_model(bert_model_name)
     
-    if roberta_tokenizer and roberta_model:
+    if bert_tokenizer and bert_model:
         texts = df['cleaned_text'].tolist()
         ground_truth_predictions = []
         
-        print("   🔮 Generating ground truth labels with RoBERTa...")
-        for i in tqdm(range(0, len(texts), 8), desc="      RoBERTa GT", leave=False):
+        print("   🔮 Generating ground truth labels with BERT...")
+        for i in tqdm(range(0, len(texts), 8), desc="      BERT GT", leave=False):
             try:
                 batch_texts = texts[i:i+8]
-                batch_preds = predict_sentiment_batch(batch_texts, roberta_tokenizer, roberta_model, roberta_model_name, device)
+                batch_preds = predict_sentiment_batch(batch_texts, bert_tokenizer, bert_model, bert_model_name, device)
                 ground_truth_predictions.extend(batch_preds)
                 gc.collect()
             except Exception as e:
@@ -649,22 +649,22 @@ def main():
         
         invalid_mask = df['ground_truth'] == -1
         if invalid_mask.sum() > 0:
-            print(f"   ⚠️  {invalid_mask.sum()} invalid RoBERTa predictions, using keyword-based fallback...")
+            print(f"   ⚠️  {invalid_mask.sum()} invalid BERT predictions, using keyword-based fallback...")
             df.loc[invalid_mask, 'ground_truth'] = df.loc[invalid_mask, 'cleaned_text'].apply(detect_sentiment_advanced)
         
-        del roberta_model
-        del roberta_tokenizer
+        del bert_model
+        del bert_tokenizer
         gc.collect()
         time.sleep(1.0)
         
         sentiment_counts = df['ground_truth'].value_counts().sort_index()
         sentiment_names = {0: 'Negative', 1: 'Neutral', 2: 'Positive'}
-        print("📊 Ground truth sentiment distribution:")
+        print("📊 Ground truth sentiment distribution (from BERT):")
         for sentiment, count in sentiment_counts.items():
             percentage = (count / len(df)) * 100
             print(f"   {sentiment_names[sentiment]}: {count} ({percentage:.1f}%)")
     else:
-        print("   ⚠️  Failed to load RoBERTa, using keyword-based ground truth...")
+        print("   ⚠️  Failed to load BERT, using keyword-based ground truth...")
         df['ground_truth'] = df['cleaned_text'].apply(detect_sentiment_advanced)
         sentiment_counts = df['ground_truth'].value_counts().sort_index()
         sentiment_names = {0: 'Negative', 1: 'Neutral', 2: 'Positive'}
@@ -680,9 +680,17 @@ def main():
     print(f"\n📊 Total samples: {len(texts)}")
     
     # Split data
-    X_train, X_test, y_train, y_test = train_test_split(
-        texts, y_true, test_size=0.2, random_state=42, stratify=y_true
-    )
+    # Check if we can use stratify (requires at least one sample per class in each split)
+    unique_classes = len(set(y_true))
+    if unique_classes > 1:
+        X_train, X_test, y_train, y_test = train_test_split(
+            texts, y_true, test_size=0.2, random_state=42, stratify=y_true
+        )
+    else:
+        # If only one class, don't use stratify
+        X_train, X_test, y_train, y_test = train_test_split(
+            texts, y_true, test_size=0.2, random_state=42
+        )
     
     print(f"📊 Dataset split:")
     print(f"   Training: {len(X_train)} samples")
@@ -919,12 +927,6 @@ def main():
         print("\n" + "="*80)
         print("📊 GENERATING RESULTS")
         print("="*80)
-        
-        # Save CSV
-        output_dir = os.path.join(Config.OUTPUT_DIR, 'training_results')
-        os.makedirs(output_dir, exist_ok=True)
-        results_df = pd.DataFrame([result])
-        results_df.to_csv(os.path.join(output_dir, 'tabpfn_model_comparison_table.csv'), index=False)
         
         # Create visualization
         create_performance_visualization(result, Config.CONFUSION_MATRIX_DIR)

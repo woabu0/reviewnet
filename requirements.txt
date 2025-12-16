@@ -1,0 +1,13 @@
+pandas
+numpy
+torch
+transformers
+scikit-learn
+matplotlib
+seaborn
+tqdm
+tabpfn
+wordcloud
+nltk
+google-play-scraper
+einops
